@@ -21,6 +21,22 @@ function safeCdata(text) {
   return String(text || "").replace(/\]\]>/g, "]]]]><![CDATA[>");
 }
 
+function limitText(text, max = 1500) {
+  const str = String(text || "");
+  if (str.length <= max) return str;
+  return str.slice(0, max) + "\n\n内容较长，已截断。";
+}
+
+function buildTextReply(toUser, fromUser, content) {
+  return `<xml>
+<ToUserName><![CDATA[${safeCdata(toUser)}]]></ToUserName>
+<FromUserName><![CDATA[${safeCdata(fromUser)}]]></FromUserName>
+<CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[${safeCdata(limitText(content))}]]></Content>
+</xml>`;
+}
+
 app.get("/", (req, res) => {
   res.send("wechat-dify server is running");
 });
@@ -36,27 +52,33 @@ app.get("/wechat", (req, res) => {
 });
 
 app.post("/wechat", async (req, res) => {
-  try {
-    if (!DIFY_API_KEY) {
-      console.error("Missing DIFY_API_KEY");
-      return res.send("success");
-    }
+  let fromUser = "";
+  let toUser = "";
 
+  try {
     const parsed = await xml2js.parseStringPromise(req.body, {
       explicitArray: false,
       trim: true
     });
 
     const msg = parsed.xml;
-    const fromUser = msg.FromUserName;
-    const toUser = msg.ToUserName;
-    const msgType = msg.MsgType;
+    fromUser = msg.FromUserName;
+    toUser = msg.ToUserName;
 
-    if (msgType !== "text") {
+    if (msg.MsgType !== "text") {
       return res.send("success");
     }
 
     const userMessage = msg.Content || "";
+
+    if (!DIFY_API_KEY) {
+      const reply = buildTextReply(
+        fromUser,
+        toUser,
+        "Dify API Key 还没有配置好。"
+      );
+      return res.type("application/xml").send(reply);
+    }
 
     const difyRes = await axios.post(
       `${DIFY_API_URL}/chat-messages`,
@@ -71,24 +93,27 @@ app.post("/wechat", async (req, res) => {
           Authorization: `Bearer ${DIFY_API_KEY}`,
           "Content-Type": "application/json"
         },
-        timeout: 15000
+        timeout: 12000
       }
     );
 
-    const answer = difyRes.data.answer || "我暂时没有生成回复。";
+    const answer = difyRes.data.answer || "我暂时没有生成出回复。";
+    const replyXml = buildTextReply(fromUser, toUser, answer);
 
-    const replyXml = `<xml>
-<ToUserName><![CDATA[${safeCdata(fromUser)}]]></ToUserName>
-<FromUserName><![CDATA[${safeCdata(toUser)}]]></FromUserName>
-<CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>
-<MsgType><![CDATA[text]]></MsgType>
-<Content><![CDATA[${safeCdata(answer)}]]></Content>
-</xml>`;
-
-    res.type("application/xml").send(replyXml);
+    return res.type("application/xml").send(replyXml);
   } catch (err) {
     console.error("Wechat webhook error:", err.response?.data || err.message);
-    res.send("success");
+
+    if (fromUser && toUser) {
+      const fallback = buildTextReply(
+        fromUser,
+        toUser,
+        "这个任务处理时间有点久，微信接口可能超时了。你可以稍后再试，或者发一个更短的问题。"
+      );
+      return res.type("application/xml").send(fallback);
+    }
+
+    return res.send("success");
   }
 });
 
